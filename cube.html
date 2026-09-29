@@ -58,16 +58,13 @@
   <script>
     'use strict';
 
-    /* ==================== CONFIGURATION ==================== */
     const CONFIG = {
       cubeSize: 0.4,
       cubeDistance: 2.0,
       cameraFOV: 50,
-      particlesCount: 0,
       colors: [0x00e5ff, 0x2979ff, 0xa855f7, 0xff3ea5, 0x22ff88]
     };
 
-    /* ==================== THREE.JS SETUP ==================== */
     const canvas = document.getElementById('canvas');
     const renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true });
     renderer.setClearColor(0x000000, 0);
@@ -85,34 +82,28 @@
     window.addEventListener('resize', onWindowResize);
     onWindowResize();
 
-    /* ==================== CUBE GEOMETRY ==================== */
     const cubeGroup = new THREE.Group();
     cubeGroup.position.z = -CONFIG.cubeDistance;
     scene.add(cubeGroup);
 
-    // Create cube with colored faces
     const geometry = new THREE.BoxGeometry(CONFIG.cubeSize, CONFIG.cubeSize, CONFIG.cubeSize);
     const materials = CONFIG.colors.map(color => 
-      new THREE.MeshBasicMaterial({ 
-        color, 
-        transparent: true, 
+      new THREE.MeshBasicMaterial({
+        color,
+        transparent: true,
         opacity: 0.8,
         side: THREE.DoubleSide
       })
     );
-    
-    // Add black material for the 6th face
     materials.push(new THREE.MeshBasicMaterial({ color: 0x111111, transparent: true, opacity: 0.8 }));
 
     const cube = new THREE.Mesh(geometry, materials);
     cubeGroup.add(cube);
 
-    // Add edges
     const edges = new THREE.EdgesGeometry(geometry);
     const wireframe = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: 0x00e5ff, linewidth: 2 }));
     cubeGroup.add(wireframe);
 
-    /* ==================== HAND TRACKING ==================== */
     const videoEl = document.getElementById('video');
     const statusEl = document.getElementById('status');
     let hands = null;
@@ -131,10 +122,8 @@
       const vw = videoEl.videoWidth || 640;
       const vh = videoEl.videoHeight || 480;
       const scale = Math.max(window.innerWidth / vw, window.innerHeight / vh);
-      
       const x = landmark.x * vw * scale - (vw * scale - window.innerWidth) / 2;
       const y = landmark.y * vh * scale - (vh * scale - window.innerHeight) / 2;
-      
       return { x, y };
     }
 
@@ -143,27 +132,27 @@
         handLandmarks = results.multiHandLandmarks[0];
         isHandDetected = true;
       } else {
+        handLandmarks = null;
         isHandDetected = false;
       }
     }
 
     async function initCamera() {
       try {
-        const constraints = {
+        const stream = await navigator.mediaDevices.getUserMedia({
           video: {
             facingMode: { ideal: 'environment' },
             width: { ideal: 1280 },
             height: { ideal: 720 }
           },
           audio: false
-        };
+        });
 
-        const stream = await navigator.mediaDevices.getUserMedia(constraints);
         videoEl.srcObject = stream;
 
-        return new Promise((resolve) => {
+        await new Promise((resolve) => {
           videoEl.onloadedmetadata = () => {
-            videoEl.play();
+            videoEl.play().catch(() => {});
             resolve();
           };
         });
@@ -174,11 +163,29 @@
       }
     }
 
+    function waitForHands(maxAttempts = 100) {
+      return new Promise((resolve, reject) => {
+        let attempts = 0;
+        const check = () => {
+          if (typeof window.Hands !== 'undefined') {
+            resolve();
+          } else if (attempts < maxAttempts) {
+            attempts += 1;
+            setTimeout(check, 100);
+          } else {
+            reject(new Error('MediaPipe Hands failed to load on this device'));
+          }
+        };
+        check();
+      });
+    }
+
     async function initHandTracking() {
       try {
-        hands = new Hands({
-          locateFile: (file) => 
-            `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${file}`
+        await waitForHands();
+
+        hands = new window.Hands({
+          locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${file}`
         });
 
         hands.setOptions({
@@ -193,7 +200,6 @@
 
         showStatus('Ready! Move your hand', 3000);
 
-        // Start hand detection loop
         let lastVideoTime = -1;
         const detectionLoop = async () => {
           if (videoEl.readyState >= 2 && videoEl.currentTime !== lastVideoTime) {
@@ -206,6 +212,7 @@
           }
           requestAnimationFrame(detectionLoop);
         };
+
         detectionLoop();
       } catch (error) {
         console.error('Hand tracking error:', error);
@@ -214,14 +221,12 @@
       }
     }
 
-    /* ==================== ANIMATION LOOP ==================== */
     let rotationX = 0;
     let rotationY = 0;
 
     function animate() {
       requestAnimationFrame(animate);
 
-      // Rotate cube continuously
       rotationX += 0.01;
       rotationY += 0.02;
       cube.rotation.x = rotationX;
@@ -229,26 +234,19 @@
       wireframe.rotation.x = rotationX;
       wireframe.rotation.y = rotationY;
 
-      // Follow hand if detected
       if (isHandDetected && handLandmarks) {
-        const palmCenter = toScreenCoords(handLandmarks[9]); // Palm landmark
-
-        // Convert screen coordinates to NDC
+        const palmCenter = toScreenCoords(handLandmarks[9]);
         const ndcX = (palmCenter.x / window.innerWidth) * 2 - 1;
         const ndcY = -(palmCenter.y / window.innerHeight) * 2 + 1;
 
-        // Project NDC to world space
         const vector = new THREE.Vector3(ndcX, ndcY, 0.5);
         vector.unproject(camera);
         vector.sub(camera.position).normalize();
 
         const targetPos = camera.position.clone().add(vector.multiplyScalar(CONFIG.cubeDistance));
-        
-        // Smooth interpolation
         cubeGroup.position.x += (targetPos.x - cubeGroup.position.x) * 0.15;
         cubeGroup.position.y += (targetPos.y - cubeGroup.position.y) * 0.15;
       } else {
-        // Idle position at center
         cubeGroup.position.x += (0 - cubeGroup.position.x) * 0.1;
         cubeGroup.position.y += (0 - cubeGroup.position.y) * 0.1;
       }
@@ -256,7 +254,6 @@
       renderer.render(scene, camera);
     }
 
-    /* ==================== INITIALIZATION ==================== */
     async function init() {
       try {
         await initCamera();
@@ -267,14 +264,12 @@
       }
     }
 
-    // Start on page load or first interaction
     if (document.readyState === 'loading') {
       document.addEventListener('DOMContentLoaded', init);
     } else {
       init();
     }
 
-    // Retry camera on visibility change
     document.addEventListener('visibilitychange', () => {
       if (!document.hidden && videoEl.paused && videoEl.srcObject) {
         videoEl.play().catch(() => {});
