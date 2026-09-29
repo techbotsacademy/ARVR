@@ -130,16 +130,66 @@ function handOpenness(lm) {
 
 const handVector = new THREE.Vector3();
 
-function onResults(res) {
-  const now = performance.now() / 1000;
-  const lm = res.multiHandLandmarks && res.multiHandLandmarks[0];
+/* ============================ ASPECT-CORRECT LANDMARK MAPPING ============================ */
+function getScreenNDC(landmark) {
+  const videoAspect = cam.videoWidth / cam.videoHeight;
+  const screenAspect = window.innerWidth / window.innerHeight;
 
-  if (!lm) {
-    // Keep target rendered for 1.2s to prevent frame-drop flickering
-    if (now - handState.lastTime > 1.2) {
-      handState.present = false;
+  let scaleX = 1, scaleY = 1;
+  let offsetX = 0, offsetY = 0;
+
+  // Calculate cropping offsets applied by object-fit: cover
+  if (screenAspect > videoAspect) {
+    scaleY = videoAspect / screenAspect;
+    offsetY = (1 - scaleY) / 2;
+  } else {
+    scaleX = screenAspect / videoAspect;
+    offsetX = (1 - scaleX) / 2;
+  }
+
+  // Map raw 0..1 landmark to actual visible screen area
+  const screenX = (landmark.x - offsetX) / scaleX;
+  const screenY = (landmark.y - offsetY) / scaleY;
+
+  // Convert to WebGL Normalized Device Coordinates (-1 to 1)
+  return {
+    x: screenX * 2 - 1,
+    y: -(screenY * 2 - 1)
+  };
+}
+
+  function onResults(res) {
+    const now = performance.now() / 1000;
+    const lm = res.multiHandLandmarks && res.multiHandLandmarks[0];
+
+    if (!lm) {
+      if (now - handState.lastTime > 0.5) {
+        handState.present = false;
+      }
+      return;
     }
-    return;
+
+    // Compute corrected NDC coordinates for the palm center (Landmark 9)
+    const ndc = getScreenNDC(lm[9]);
+
+    // Project screen coordinates into Three.js 3D world space
+    handVector.set(ndc.x, ndc.y, 0.5);
+    handVector.unproject(camera);
+    handVector.sub(camera.position).normalize();
+    
+    const targetWorldPos = camera.position.clone().add(handVector.multiplyScalar(DIST));
+
+    // Initialize position on first detection to eliminate sliding from origin
+    if (!handState.present) {
+      root.position.copy(targetWorldPos);
+    }
+
+    handState.targetX = targetWorldPos.x;
+    handState.targetY = targetWorldPos.y;
+    handState.targetZ = targetWorldPos.z;
+    handState.open = handOpenness(lm);
+    handState.present = true;
+    handState.lastTime = now;
   }
 
   const palmLandmark = lm[9];
