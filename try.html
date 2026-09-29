@@ -3,17 +3,14 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
-<title>Holo Cube Web AR - Hand Anchored</title>
+<title>Holo Cube Mobile WebAR Fixed</title>
 <style>
   html, body { margin:0; padding:0; width:100%; height:100%; overflow:hidden; background:#000; }
-  /* REAR CAMERA Feed */
   #cam { position:fixed; inset:0; width:100%; height:100%; object-fit:cover; }
-  /* Transparent WebGL Canvas Overlay */
   #gl  { position:fixed; inset:0; width:100%; height:100%; pointer-events:none; }
-  /* Status message */
   #msg { 
     position:fixed; left:50%; bottom:calc(env(safe-area-inset-bottom, 0px) + 28px); transform:translateX(-50%);
-    padding:10px 18px; border-radius:20px; background:rgba(0,0,0,.75); color:#fff; font:500 14px/1.2 system-ui, sans-serif;
+    padding:10px 18px; border-radius:20px; background:rgba(0,0,0,.8); color:#fff; font:500 14px/1.2 system-ui, sans-serif;
     pointer-events:none; opacity:0; transition:opacity .3s; white-space:nowrap; z-index: 10; text-align: center; 
   }
   #msg.show { opacity:1; }
@@ -22,7 +19,7 @@
 <body>
 <video id="cam" autoplay muted playsinline crossorigin="anonymous"></video>
 <canvas id="gl"></canvas>
-<div id="msg">Accessing Rear Camera...</div>
+<div id="msg">Initializing Camera...</div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js" crossorigin="anonymous"></script>
@@ -32,11 +29,11 @@
 'use strict';
 
 /* ============================ CONFIG ============================ */
-const EDGE       = 0.35;             // Base cube edge size
-const DIST       = 2.0;              // Distance in front of camera
+const EDGE       = 0.35;
+const DIST       = 2.0;
 const FOV        = 50;
-const MIN_SCALE  = 0.3;              // Closed fist scale multiplier
-const MAX_SCALE  = 1.6;              // Fully open hand scale multiplier
+const MIN_SCALE  = 0.3;
+const MAX_SCALE  = 1.5;
 const PALETTE    = [0x00e5ff, 0x2979ff, 0xa855f7, 0xff3ea5, 0x22ff88].map(c => new THREE.Color(c));
 
 /* ============================ HELPERS ============================ */
@@ -84,17 +81,15 @@ const rotor = new THREE.Group();
 root.position.set(0, 0, -DIST);
 root.add(rotor); 
 scene.add(root);
-
-// HIDE CUBE BY DEFAULT — Only show when hand is detected
 root.visible = false;
 
 const tex  = glowTexture();
 const half = EDGE / 2;
 
-// Cube Geometry & Mesh
+// Cube Geometry
 const faceGeo = new THREE.BoxGeometry(EDGE, EDGE, EDGE, 6, 6, 6);
 faceGeo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(faceGeo.attributes.position.count * 3), 3));
-const faceMat = new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.25, side: THREE.DoubleSide, depthWrite: false, blending: THREE.AdditiveBlending });
+const faceMat = new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.35, side: THREE.DoubleSide, depthWrite: false, blending: THREE.AdditiveBlending });
 rotor.add(new THREE.Mesh(faceGeo, faceMat));
 
 // Edges
@@ -114,24 +109,15 @@ for (let axis = 0; axis < 3; axis++) {
   }
 }
 
-// Corner Sprites & Central Halo
-const corners = [];
-for (let i = 0; i < 8; i++) {
-  const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, opacity: 0.95 }));
-  s.position.set((i & 1 ? half : -half), (i & 2 ? half : -half), (i & 4 ? half : -half));
-  s.scale.setScalar(0.09);
-  rotor.add(s); corners.push(s);
-}
-
-const halo = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, opacity: 0.2 }));
+// Halo
+const halo = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, opacity: 0.25 }));
 halo.scale.setScalar(EDGE * 2.5);
 root.add(halo);
 
-/* ============================ HAND ANCHORING & TRACKING ============================ */
+/* ============================ TRACKING & HYSTERESIS ============================ */
 const handState = { present: false, open: 0.5, targetX: 0, targetY: 0, targetZ: -DIST, lastTime: 0 };
 let scaleCur = 1, scaleTarget = 1;
 
-/** Measures finger expansion relative to palm base */
 function handOpenness(lm) {
   const d3 = (a, b) => Math.hypot(a.x - b.x, a.y - b.y, (a.z - b.z) * 0.5);
   const palm = d3(lm[0], lm[9]) + d3(lm[0], lm[5]) * 0.5 + d3(lm[0], lm[17]) * 0.5;
@@ -144,28 +130,56 @@ function handOpenness(lm) {
 
 const handVector = new THREE.Vector3();
 
+/* ============================ ASPECT-CORRECT LANDMARK MAPPING ============================ */
+function getScreenNDC(landmark) {
+  const vW = cam.videoWidth || 640;
+  const vH = cam.videoHeight || 480;
+  
+  const videoAspect = vW / vH;
+  const screenAspect = window.innerWidth / window.innerHeight;
+
+  let scaleX = 1, scaleY = 1;
+  let offsetX = 0, offsetY = 0;
+
+  if (screenAspect > videoAspect) {
+    scaleY = videoAspect / screenAspect;
+    offsetY = (1 - scaleY) / 2;
+  } else {
+    scaleX = screenAspect / videoAspect;
+    offsetX = (1 - scaleX) / 2;
+  }
+
+  const screenX = (landmark.x - offsetX) / scaleX;
+  const screenY = (landmark.y - offsetY) / scaleY;
+
+  return {
+    x: screenX * 2 - 1,
+    y: -(screenY * 2 - 1)
+  };
+}
+
 function onResults(res) {
   const now = performance.now() / 1000;
   const lm = res.multiHandLandmarks && res.multiHandLandmarks[0];
 
   if (!lm) {
-    handState.present = false;
+    if (now - handState.lastTime > 0.5) {
+      handState.present = false;
+    }
     return;
   }
 
-  // Landmark 9 represents the middle finger base (center of palm)
-  const palmLandmark = lm[9];
+  const ndc = getScreenNDC(lm[9]);
 
-  // Map 2D normalized screen position (0..1) to WebGL Normalized Device Coordinates (-1..1)
-  const ndcX = (palmLandmark.x) * 2 - 1;
-  const ndcY = -(palmLandmark.y) * 2 + 1; // Invert Y axis for WebGL coordinate space
-
-  // Unproject NDC coordinates into 3D world space at distance DIST
-  handVector.set(ndcX, ndcY, 0.5);
+  handVector.set(ndc.x, ndc.y, 0.5);
   handVector.unproject(camera);
   handVector.sub(camera.position).normalize();
   
   const targetWorldPos = camera.position.clone().add(handVector.multiplyScalar(DIST));
+
+  if (!handState.present) {
+    root.position.copy(targetWorldPos);
+  }
 
   handState.targetX = targetWorldPos.x;
   handState.targetY = targetWorldPos.y;
@@ -184,30 +198,23 @@ function frame() {
   const dt = Math.min(now - last, 0.05); 
   last = now;
 
-  // Render ONLY when hand is detected
-  if (handState.present && (now - handState.lastTime < 0.5)) {
+  if (handState.present && (now - handState.lastTime < 0.8)) {
     root.visible = true;
 
-    // Smoothly interpolate position directly onto the palm center
-    root.position.x = lerp(root.position.x, handState.targetX, 1 - Math.exp(-dt * 15));
-    root.position.y = lerp(root.position.y, handState.targetY, 1 - Math.exp(-dt * 15));
-    root.position.z = lerp(root.position.z, handState.targetZ, 1 - Math.exp(-dt * 15));
+    root.position.x = lerp(root.position.x, handState.targetX, 1 - Math.exp(-dt * 14));
+    root.position.y = lerp(root.position.y, handState.targetY, 1 - Math.exp(-dt * 14));
+    root.position.z = lerp(root.position.z, handState.targetZ, 1 - Math.exp(-dt * 14));
 
-    // Smoothly scale based on finger openness
     scaleTarget = lerp(MIN_SCALE, MAX_SCALE, handState.open);
-    scaleCur = lerp(scaleCur, scaleTarget, 1 - Math.exp(-dt * 10));
+    scaleCur = lerp(scaleCur, scaleTarget, 1 - Math.exp(-dt * 8));
     root.scale.setScalar(scaleCur);
 
-    // Slow subtle rotation for holographic effect while following hand
     rotor.rotation.y += 0.5 * dt;
     rotor.rotation.x += 0.25 * dt;
-
   } else {
-    // Hide immediately when hand leaves the camera frame
     root.visible = false;
   }
 
-  // Update holographic vertex colors
   const t = now;
   const pos = faceGeo.attributes.position, col = faceGeo.attributes.color;
   for (let i = 0; i < pos.count; i++) {
@@ -216,16 +223,11 @@ function frame() {
   }
   col.needsUpdate = true;
 
-  for (const e of edges) {
-    palette(t * 0.1 + e.phase * 0.6, e.core.material.color);
-    e.glow.material.color.copy(e.core.material.color);
-  }
-
   renderer.render(scene, camera);
 }
 requestAnimationFrame(frame);
 
-/* ============================ CAMERA & REAR TRACKING SETUP ============================ */
+/* ============================ MOBILE ENGINE & CAMERA SETUP ============================ */
 const cam = document.getElementById('cam');
 const msg = document.getElementById('msg');
 
@@ -239,22 +241,17 @@ async function init() {
   try {
     const stream = await navigator.mediaDevices.getUserMedia({
       video: { 
-        facingMode: { exact: 'environment' }, 
-        width: { ideal: 1280 }, 
-        height: { ideal: 720 } 
+        facingMode: { ideal: 'environment' }, 
+        width: { ideal: 640 }, 
+        height: { ideal: 480 } 
       },
       audio: false
-    }).catch(async () => {
-      return await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'environment' },
-        audio: false
-      });
     });
 
     cam.srcObject = stream;
     await cam.play();
 
-    showMsg('Initializing Hand Tracking...', 0);
+    showMsg('Initializing Tracker...', 0);
 
     const hands = new Hands({
       locateFile: file => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${file}`
@@ -270,26 +267,29 @@ async function init() {
     hands.onResults(onResults);
     await hands.initialize();
 
-    showMsg('Show your hand to render the cube', 4000);
+    showMsg('Tracking Active', 2000);
 
+    let lastProcessed = 0;
     let isProcessing = false;
-    async function processFrame() {
-      if (!isProcessing && cam.readyState >= 2) {
+
+    async function processLoop(timestamp) {
+      if (!isProcessing && cam.readyState >= 2 && (timestamp - lastProcessed > 33)) {
         isProcessing = true;
+        lastProcessed = timestamp;
         try {
           await hands.send({ image: cam });
         } catch (e) {
-          console.error("Frame processing error:", e);
+          console.warn('Frame dropped:', e);
         }
         isProcessing = false;
       }
-      requestAnimationFrame(processFrame);
+      requestAnimationFrame(processLoop);
     }
-    processFrame();
+    requestAnimationFrame(processLoop);
 
   } catch (err) {
-    console.error('Initialization failed:', err);
-    showMsg('Camera access failed or permission denied.', 0);
+    console.error('AR Init Error:', err);
+    showMsg('Camera access denied or failed.', 0);
   }
 }
 
