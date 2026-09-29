@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Holo Cube AR</title>
+<style>
+  html, body { margin:0; padding:0; width:100%; height:100%; overflow:hidden; background:#000; }
+  /* Live camera: full-screen cover + mirrored (selfie view) */
+  #cam { position:fixed; inset:0; width:100%; height:100%; object-fit:cover; transform:scaleX(-1); }
+  /* Transparent WebGL layer for the hologram */
+  #gl  { position:fixed; inset:0; width:100%; height:100%; pointer-events:none; }
+  /* One-time status message (ready / failed) */
+  #msg { position:fixed; left:50%; bottom:calc(env(safe-area-inset-bottom, 0px) + 28px); transform:translateX(-50%);
+         padding:10px 18px; border-radius:20px; background:rgba(0,0,0,.55); color:#fff; font:500 15px/1.2 system-ui, sans-serif;
+         pointer-events:none; opacity:0; transition:opacity .5s; white-space:nowrap; }
+  #msg.show { opacity:1; }
+</style>
+</head>
+<body>
+<video id="cam" autoplay muted playsinline></video>
+<canvas id="gl"></canvas>
+<div id="msg"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js" crossorigin="anonymous"></script>
+<script>
+(() => {
+'use strict';
+
+/* ============================ CONFIG ============================ */
+const EDGE      = 0.4;              // cube edge length (small by default)
+const DIST      = 2.2;              // cube distance from camera (scene units)
+const FOV       = 50;
+const MIN_SCALE = 0.45;             // closed hand
+const MAX_SCALE_DESKTOP = 1.8;      // open hand (clamped further on narrow screens)
+const AUTO_ROT  = { x: 0.08, y: 0.22 };   // rad/s idle rotation
+const PARTICLES = 80;               // kept low for mobile
+const PALETTE = [0x00e5ff, 0x2979ff, 0xa855f7, 0xff3ea5, 0x22ff88].map(c => new THREE.Color(c)); // cyan, blue, purple, pink, green
+
+/* ============================ HELPERS ============================ */
+const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+const lerp  = (a, b, t) => a + (b - a) * t;
+const _c = new THREE.Color();
+/** Smooth cyclic colour from the 5-colour palette, t in any range. */
+function palette(t, out = _c) {
+  const n = PALETTE.length;
+  t = ((t % 1) + 1) % 1 * n;
+  const i = Math.floor(t), f = t - i;
+  return out.copy(PALETTE[i % n]).lerp(PALETTE[(i + 1) % n], f * f * (3 - 2 * f));
+}
+function glowTexture() {
+  const c = document.createElement('canvas'); c.width = c.height = 64;
+  const g = c.getContext('2d'), gr = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+  gr.addColorStop(0, 'rgba(255,255,255,1)'); gr.addColorStop(0.3, 'rgba(255,255,255,0.35)'); gr.addColorStop(1, 'rgba(255,255,255,0)');
+  g.fillStyle = gr; g.fillRect(0, 0, 64, 64);
+  return new THREE.CanvasTexture(c);
+}
+
+/* ============================ THREE.JS SCENE ============================ */
+const canvas = document.getElementById('gl');
+const renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true, powerPreference: 'high-performance' });
+renderer.setClearColor(0x000000, 0);
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(FOV, 1, 0.1, 50);
+const visH = 2 * DIST * Math.tan(THREE.MathUtils.degToRad(FOV / 2)); // visible height at cube distance
+let W = 1, H = 1, maxScale = MAX_SCALE_DESKTOP;
+
+function resize() {
+  W = window.innerWidth; H = window.innerHeight;
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  renderer.setSize(W, H, false);
+  camera.aspect = W / H; camera.updateProjectionMatrix();
+  // keep the enlarged cube inside the screen in portrait mode
+  maxScale = clamp((visH * camera.aspect * 0.8) / (EDGE * 1.5), 0.9, MAX_SCALE_DESKTOP);
+}
+window.addEventListener('resize', resize);
+window.addEventListener('orientationchange', () => setTimeout(resize, 250));
+resize();
+
+const root  = new THREE.Group();  // position (float) + scale (hand)
+const rotor = new THREE.Group();  // rotation (hand / auto)
+root.position.set(0, 0, -DIST);
+root.add(rotor); scene.add(root);
+
+const tex = glowTexture();
+const half = EDGE / 2;
+
+/* --- Glass faces: gradient vertex colours, transparent --- */
+const faceGeo = new THREE.BoxGeometry(EDGE, EDGE, EDGE, 6, 6, 6);
+faceGeo.setAttribute('color', new THREE.BufferAttribute(new Float32Array(faceGeo.attributes.position.count * 3), 3));
+const faceMat = new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.13, side: THREE.DoubleSide, depthWrite: false, blending: THREE.AdditiveBlending });
+rotor.add(new THREE.Mesh(faceGeo, faceMat));
+
+/* --- Neon edges: 12 thin cylinders + soft outer glow cylinders --- */
+const edges = [];
+for (let axis = 0; axis < 3; axis++) {
+  for (let k = 0; k < 4; k++) {
+    const a = (k & 1) ? half : -half, b = (k & 2) ? half : -half;
+    const mk = (r, op) => {
+      const m = new THREE.Mesh(new THREE.CylinderGeometry(r, r, EDGE + r * 2, 6, 1),
+        new THREE.MeshBasicMaterial({ transparent: true, opacity: op, blending: THREE.AdditiveBlending, depthWrite: false }));
+      if (axis === 0) { m.rotation.z = Math.PI / 2; m.position.set(0, a, b); }
+      if (axis === 1) { m.position.set(a, 0, b); }
+      if (axis === 2) { m.rotation.x = Math.PI / 2; m.position.set(a, b, 0); }
+      rotor.add(m); return m;
+    };
+    edges.push({ core: mk(0.005, 0.95), glow: mk(0.016, 0.16), phase: edges.length / 12 });
+  }
+}
+
+/* --- Corner lights (8) --- */
+const corners = [];
+for (let i = 0; i < 8; i++) {
+  const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, opacity: 0.95 }));
+  s.position.set((i & 1 ? half : -half), (i & 2 ? half : -half), (i & 4 ? half : -half));
+  s.scale.setScalar(0.09);
+  rotor.add(s); corners.push(s);
+}
+
+/* --- Soft holographic glow behind the cube (brightens when grabbed) --- */
+const halo = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, opacity: 0.12 }));
+halo.scale.setScalar(EDGE * 2.6);
+root.add(halo);
+
+/* --- Orbiting particles --- */
+const pData = [], pPos = new Float32Array(PARTICLES * 3), pCol = new Float32Array(PARTICLES * 3);
+for (let i = 0; i < PARTICLES; i++) {
+  pData.push({ r: EDGE * (0.75 + Math.random() * 0.9), a: Math.random() * 6.283, s: (0.15 + Math.random() * 0.35) * (Math.random() < .5 ? -1 : 1),
+               y: (Math.random() - 0.5) * EDGE * 1.6, w: Math.random() * 6.283 });
+}
+const pGeo = new THREE.BufferGeometry();
+pGeo.setAttribute('position', new THREE.BufferAttribute(pPos, 3));
+pGeo.setAttribute('color', new THREE.BufferAttribute(pCol, 3));
+const particles = new THREE.Points(pGeo, new THREE.PointsMaterial({ map: tex, size: 0.035, vertexColors: true, transparent: true, opacity: 0.7, blending: THREE.AdditiveBlending, depthWrite: false }));
+root.add(particles);
+
+/* ============================ HAND STATE ============================ */
+const hand = { present: false, lastSeen: 0, open: 0.5, openS: 0.5, px: 0, py: 0, hasPrev: false, prevT: 0, vx: 0, vy: 0 };
+let interacting = false, glowAmt = 0;
+let scaleCur = 1, scaleTarget = 1;
+const rotVel = { x: AUTO_ROT.x, y: AUTO_ROT.y };
+
+const cam = document.getElementById('cam');
+
+/* Camera selection: phones/tablets use the rear camera (not mirrored); laptops/desktops keep the mirrored webcam. */
+const IS_MOBILE = /Android|iPhone|iPad|iPod|Mobile|Tablet/i.test(navigator.userAgent)
+  || (navigator.userAgentData && navigator.userAgentData.mobile === true)
+  || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);   // iPadOS reports as Mac
+const MIRROR = !IS_MOBILE;
+if (!MIRROR) cam.style.transform = 'none';
+
+/* Mobile-only tuning: phone inference is slower and the hand appears smaller/farther via the rear camera.
+   Desktop values are exactly the original ones. Also on mobile the cube stays still until a hand interacts. */
+const HAND_TIMEOUT = IS_MOBILE ? 1.0 : 0.35;    // seconds before a missing hand is considered gone
+const NEAR_MIN     = IS_MOBILE ? 0.32 : 0.14;   // min grab radius (fraction of shorter screen side)
+const NEAR_MULT    = IS_MOBILE ? 2.4 : 1.25;    // grab radius vs. projected cube radius
+const IDLE_ROT     = { x: 0, y: 0 };   // no automatic rotation (laptop and mobile)
+const IDLE_BOB     = 0;                // no automatic floating (laptop and mobile)
+rotVel.x = 0; rotVel.y = 0;            // cube starts perfectly still
+
+/** Map a normalised MediaPipe landmark to screen pixels (accounts for object-fit:cover + mirroring). */
+function toScreen(l) {
+  const vw = cam.videoWidth || 640, vh = cam.videoHeight || 480;
+  const s = Math.max(W / vw, H / vh);
+  const x = l.x * vw * s - (vw * s - W) / 2;
+  const y = l.y * vh * s - (vh * s - H) / 2;
+  return { x: MIRROR ? W - x : x, y };
+}
+const d3 = (a, b) => Math.hypot(a.x - b.x, a.y - b.y, (a.z - b.z) * 0.5);
+
+/** Robust openness 0..1 from 5 fingertips + wrist/palm (scale-invariant). */
+function handOpenness(lm) {
+  const palm = d3(lm[0], lm[9]) + d3(lm[0], lm[5]) * 0.5 + d3(lm[0], lm[17]) * 0.5; // palm size reference
+  const tips = [4, 8, 12, 16, 20];
+  let sum = 0;
+  for (const t of tips) sum += d3(lm[t], lm[0]);           // tip-to-wrist
+  const ratio = (sum / tips.length) / (palm / 2);          // ~1.0 closed ... ~2.2 open
+  // also add tip-to-palm-centre spread so a curled fist reads as closed
+  const cx = (lm[0].x + lm[5].x + lm[17].x) / 3, cy = (lm[0].y + lm[5].y + lm[17].y) / 3;
+  let curl = 0; for (const t of tips) curl += Math.hypot(lm[t].x - cx, lm[t].y - cy);
+  const ratio2 = (curl / tips.length) / (palm / 2);
+  return clamp(((ratio + ratio2) / 2 - 0.95) / (1.75 - 0.95), 0, 1);
+}
+
+function onResults(res) {
+  const now = performance.now() / 1000;
+  const lm = res.multiHandLandmarks && res.multiHandLandmarks[0];
+  if (!lm) { hand.present = false; hand.hasPrev = false; return; }
+  hand.present = true; hand.lastSeen = now;
+  hand.open = handOpenness(lm);
+  hand.openS = lerp(hand.openS, hand.open, 0.35);
+
+  const p = toScreen(lm[9]);                // palm (middle-finger base) as hand centre
+  // hand velocity (px/s normalised by screen size) drives rotation
+  if (hand.hasPrev) {
+    const dt = Math.max(now - hand.prevT, 1 / 120), m = Math.min(W, H);
+    hand.vx = lerp(hand.vx, ((p.x - hand.px) / m) / dt, 0.5);
+    hand.vy = lerp(hand.vy, ((p.y - hand.py) / m) / dt, 0.5);
+  }
+  hand.px = p.x; hand.py = p.y; hand.prevT = now; hand.hasPrev = true;
+}
+
+/** Is the palm close to the cube's projected position? (hysteresis) */
+const _v = new THREE.Vector3();
+function updateInteraction(dt, now) {
+  if (hand.present && now - hand.lastSeen > HAND_TIMEOUT) hand.present = false;
+  if (!hand.present) { interacting = false; hand.vx *= 0.8; hand.vy *= 0.8; return; }
+  _v.copy(root.position); _v.y += 0; _v.project(camera);
+  const cx = (_v.x * 0.5 + 0.5) * W, cy = (-_v.y * 0.5 + 0.5) * H;
+  const pxPerUnit = H / visH;
+  const R = EDGE * 0.5 * 1.5 * scaleCur * pxPerUnit;          // approx. projected radius
+  const near = Math.max(R * NEAR_MULT, NEAR_MIN * Math.min(W, H));
+  const dist = Math.hypot(hand.px - cx, hand.py - cy);
+  interacting = interacting ? dist < near * 1.5 : dist < near;
+}
+
+/* ============================ RENDER LOOP ============================ */
+let last = performance.now() / 1000;
+function frame() {
+  requestAnimationFrame(frame);
+  const now = performance.now() / 1000, t = now;
+  const dt = Math.min(now - last, 0.05); last = now;
+
+  updateInteraction(dt, now);
+
+  /* scale from finger openness (only while grabbing) */
+  if (interacting) scaleTarget = lerp(MIN_SCALE, maxScale, hand.openS);
+  scaleCur = lerp(scaleCur, scaleTarget, 1 - Math.exp(-dt * 6));
+  root.scale.setScalar(scaleCur);
+
+  /* rotation: hand-driven while grabbing, slow auto-rotation otherwise */
+  if (interacting) {
+    const k = 1 - Math.exp(-dt * 10);
+    rotVel.y = lerp(rotVel.y, clamp(hand.vx * 5, -8, 8), k);
+    rotVel.x = lerp(rotVel.x, clamp(hand.vy * 5, -8, 8), k);
+    hand.vx *= Math.exp(-dt * 5); hand.vy *= Math.exp(-dt * 5);   // stops smoothly when hand stops
+  } else {
+    const k = 1 - Math.exp(-dt * 1.5);
+    rotVel.x = lerp(rotVel.x, IDLE_ROT.x, k);
+    rotVel.y = lerp(rotVel.y, IDLE_ROT.y, k);
+  }
+  rotor.rotation.x += rotVel.x * dt;
+  rotor.rotation.y += rotVel.y * dt;
+
+  /* floating: fixed place, gentle bob */
+  root.position.y = Math.sin(t * 0.9) * IDLE_BOB;
+
+  /* interaction glow */
+  glowAmt = lerp(glowAmt, interacting ? 1 : 0, 1 - Math.exp(-dt * 6));
+  halo.material.opacity = 0.10 + glowAmt * 0.28;
+  halo.scale.setScalar(EDGE * (2.6 + glowAmt * 0.6));
+  halo.material.color.copy(palette(t * 0.05 + 0.1));
+
+  /* animated holographic colours */
+  const pos = faceGeo.attributes.position, col = faceGeo.attributes.color;
+  for (let i = 0; i < pos.count; i++) {
+    palette(t * 0.05 + (pos.getX(i) + pos.getY(i) + pos.getZ(i)) / EDGE * 0.25, _c);
+    col.setXYZ(i, _c.r, _c.g, _c.b);
+  }
+  col.needsUpdate = true;
+  faceMat.opacity = 0.12 + glowAmt * 0.07;
+
+  for (const e of edges) {
+    palette(t * 0.05 + e.phase * 0.6, e.core.material.color);
+    e.glow.material.color.copy(e.core.material.color);
+    e.glow.material.opacity = 0.14 + glowAmt * 0.22;
+  }
+  corners.forEach((s, i) => {
+    palette(t * 0.05 + i / 8, s.material.color);
+    s.scale.setScalar(0.085 + Math.sin(t * 2 + i) * 0.012 + glowAmt * 0.03);
+  });
+
+  for (let i = 0; i < PARTICLES; i++) {
+    const p = pData[i]; p.a += p.s * dt;
+    pPos[i * 3]     = Math.cos(p.a) * p.r;
+    pPos[i * 3 + 1] = p.y + Math.sin(t * 0.8 + p.w) * 0.03;
+    pPos[i * 3 + 2] = Math.sin(p.a) * p.r;
+    palette(t * 0.05 + i / PARTICLES, _c);
+    pCol[i * 3] = _c.r; pCol[i * 3 + 1] = _c.g; pCol[i * 3 + 2] = _c.b;
+  }
+  pGeo.attributes.position.needsUpdate = true; pGeo.attributes.color.needsUpdate = true;
+  particles.rotation.y += dt * 0.08;
+
+  renderer.render(scene, camera);
+}
+requestAnimationFrame(frame);
+
+/* ============================ CAMERA + MEDIAPIPE ============================ */
+let camStarted = false, hands = null, busy = false, lastVideoTime = -1;
+
+/** Shows a short status message, then fades it out. */
+function showMsg(text, ms) {
+  const el = document.getElementById('msg');
+  el.textContent = text; el.classList.add('show');
+  setTimeout(() => el.classList.remove('show'), ms);
+}
+
+async function startCamera() {
+  if (camStarted) return;
+  try {
+    const size = { width: { ideal: 1280 }, height: { ideal: 720 } };
+    let stream;
+    if (IS_MOBILE) {
+      try {   // rear camera on phones/tablets
+        stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: 'environment' }, ...size }, audio: false });
+      } catch (e) {   // fallback: any available camera
+        stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+      }
+    } else {   // laptop/desktop: unchanged front webcam
+      stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', ...size }, audio: false });
+    }
+    cam.srcObject = stream;
+    await cam.play();
+    camStarted = true;
+    startTracking();
+  } catch (err) {
+    console.warn('Camera unavailable:', err);   // no visible UI; a tap/click retries (helps iOS)
+  }
+}
+
+async function startTracking() {
+  const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+  hands = new Hands({ locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${f}` });
+  hands.setOptions({ maxNumHands: 1, modelComplexity: 1, minDetectionConfidence: isMobile ? 0.5 : 0.6, minTrackingConfidence: 0.5 });
+  hands.onResults(onResults);
+  try {
+    await hands.initialize();                 // downloads/compiles the hand model
+    await hands.send({ image: cam });         // warm-up inference proves the model really runs
+  } catch (e) {
+    console.warn('Hands init failed', e);
+    showMsg('Hand tracking failed to load', 6000);
+    return;
+  }
+  showMsg('Ready \u2014 move your hand toward the cube', 4000);
+
+  const pump = async () => {
+    if (!busy && cam.readyState >= 2 && cam.currentTime !== lastVideoTime) {
+      lastVideoTime = cam.currentTime; busy = true;
+      try { await hands.send({ image: cam }); } catch (e) { /* skip frame */ }
+      busy = false;
+    }
+    requestAnimationFrame(pump);
+  };
+  pump();
+}
+
+startCamera();
+['click', 'touchend'].forEach(ev => window.addEventListener(ev, startCamera, { once: false, passive: true }));
+document.addEventListener('visibilitychange', () => { if (!document.hidden && cam.paused && cam.srcObject) cam.play().catch(() => {}); });
+})();
+</script>
+</body>
+</html>
