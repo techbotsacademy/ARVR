@@ -8,17 +8,15 @@
     * { box-sizing: border-box; margin: 0; padding: 0; }
     html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
     
-    /* Layer 1: Camera Feed */
     #webcam {
       position: absolute;
       top: 0; left: 0;
       width: 100%; height: 100%;
       object-fit: cover;
-      transform: scaleX(-1); /* Mirror view for front camera */
+      transform: scaleX(-1);
       z-index: 1;
     }
     
-    /* Layer 2: 3D AR Canvas overlay */
     #ar-canvas {
       position: absolute;
       top: 0; left: 0;
@@ -33,99 +31,45 @@
       transform: translate(-50%, -50%);
       color: white;
       font-family: sans-serif;
-      font-size: 16px;
-      background: rgba(0,0,0,0.7);
-      padding: 12px 24px;
+      font-size: 15px;
+      background: rgba(0,0,0,0.85);
+      padding: 16px 24px;
       border-radius: 8px;
       z-index: 10;
+      text-align: center;
+      max-width: 80%;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.5);
     }
   </style>
 
-  <!-- Import Three.js -->
+  <!-- Load Three.js & MediaPipe Vision directly in main thread for clean worker setup -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0/vision_bundle.js"></script>
 </head>
 <body>
 
-  <div id="loading">Initializing Camera & Worker...</div>
-  <video id="webcam" autoplay playsinline muted></video>
+  <div id="loading">Requesting Camera Access...</div>
+  <video id="webcam" playsinline muted></video>
   <canvas id="ar-canvas"></canvas>
 
-  <!-- Web Worker Script for Off-Thread MediaPipe Inference -->
-  <script id="worker-code" type="js-worker">
-    importScripts('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm/vision_bundle.js');
-
-    let handLandmarker;
-    let isProcessing = false;
-
-    async function init() {
-      const vision = await FilesetResolver.forVisionTasks(
-        'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@latest/wasm'
-      );
-      
-      handLandmarker = await HandLandmarker.createFromOptions(vision, {
-        baseOptions: {
-          modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
-          delegate: 'GPU'
-        },
-        runningMode: 'IMAGE',
-        numHands: 1
-      });
-
-      postMessage({ type: 'READY' });
-    }
-
-    self.onmessage = async (e) => {
-      if (e.data.type === 'INIT') {
-        await init();
-      } else if (e.data.type === 'PROCESS_FRAME') {
-        if (!handLandmarker || isProcessing) return;
-        
-        isProcessing = true;
-        const imageBitmap = e.data.imageBitmap;
-
-        try {
-          const results = handLandmarker.detect(imageBitmap);
-          imageBitmap.close(); // Free GPU memory immediately
-
-          if (results.landmarks && results.landmarks.length > 0) {
-            // Send wrist (0) and index tip (8) landmarks back to main thread
-            postMessage({
-              type: 'RESULTS',
-              wrist: results.landmarks[0][0],
-              indexTip: results.landmarks[0][8]
-            });
-          } else {
-            postMessage({ type: 'RESULTS', wrist: null });
-          }
-        } catch (err) {
-          postMessage({ type: 'ERROR', error: err.message });
-        } finally {
-          isProcessing = false;
-        }
-      }
-    };
-  </script>
-
-  <!-- Main Application Script -->
   <script>
     const video = document.getElementById('webcam');
     const canvas = document.getElementById('ar-canvas');
     const loadingEl = document.getElementById('loading');
 
     let renderer, scene, camera, cube;
-    let worker;
-    let workerReady = false;
-    let frameInFlight = false;
+    let handLandmarker;
+    let lastVideoTime = -1;
 
-    // Initialize Three.js Scene with Orthographic projection for pixel-accurate placement
+    // 1. Initialize Three.js Scene
     function initThreeJS() {
       renderer = new THREE.WebGLRenderer({ canvas: canvas, alpha: true, antialias: true });
       renderer.setSize(window.innerWidth, window.innerHeight);
-      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2)); // Cap pixel ratio to save thermal budget
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
 
       scene = new THREE.Scene();
 
-      // Set up camera coordinates to match screen pixel space (0,0 top-left)
+      // Orthographic camera mapping directly to screen pixels
       camera = new THREE.OrthographicCamera(
         0, window.innerWidth,
         0, window.innerHeight,
@@ -133,20 +77,20 @@
       );
       camera.position.z = 100;
 
-      // Add 3D Cube
+      // Create colorful 3D Cube
       const size = 60;
       const geometry = new THREE.BoxGeometry(size, size, size);
       const materials = [
-        new THREE.MeshBasicMaterial({ color: 0xff0000 }),
-        new THREE.MeshBasicMaterial({ color: 0x00ff00 }),
-        new THREE.MeshBasicMaterial({ color: 0x0000ff }),
-        new THREE.MeshBasicMaterial({ color: 0xffff00 }),
-        new THREE.MeshBasicMaterial({ color: 0x00ffff }),
-        new THREE.MeshBasicMaterial({ color: 0xff00ff })
+        new THREE.MeshBasicMaterial({ color: 0xff4444 }),
+        new THREE.MeshBasicMaterial({ color: 0x44ff44 }),
+        new THREE.MeshBasicMaterial({ color: 0x4444ff }),
+        new THREE.MeshBasicMaterial({ color: 0xffff44 }),
+        new THREE.MeshBasicMaterial({ color: 0x44ffff }),
+        new THREE.MeshBasicMaterial({ color: 0xff44ff })
       ];
 
       cube = new THREE.Mesh(geometry, materials);
-      cube.visible = false; // Hide until hand detected
+      cube.visible = false;
       scene.add(cube);
 
       window.addEventListener('resize', onWindowResize);
@@ -159,8 +103,9 @@
       camera.updateProjectionMatrix();
     }
 
-    // Camera Access Setup
+    // 2. Camera Access Setup (Mobile Compatible)
     async function initCamera() {
+      loadingEl.innerText = "Accessing Camera...";
       const constraints = {
         video: {
           facingMode: 'user',
@@ -172,7 +117,7 @@
 
       const stream = await navigator.mediaDevices.getUserMedia(constraints);
       video.srcObject = stream;
-      
+
       return new Promise((resolve) => {
         video.onloadedmetadata = () => {
           video.play();
@@ -181,39 +126,43 @@
       });
     }
 
-    // Web Worker Setup
-    function initWorker() {
-      const blob = new Blob([document.getElementById('worker-code').textContent], { type: 'text/javascript' });
-      worker = new Worker(URL.createObjectURL(blob));
+    // 3. Initialize MediaPipe HandLandmarker directly (Robust & Mobile Safe)
+    async function initMediaPipe() {
+      loadingEl.innerText = "Loading AI Hand Model...";
+      const vision = await tasksVision.FilesetResolver.forVisionTasks(
+        "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.0/wasm"
+      );
 
-      worker.onmessage = (e) => {
-        if (e.data.type === 'READY') {
-          workerReady = true;
-          loadingEl.style.display = 'none';
-        } else if (e.data.type === 'RESULTS') {
-          frameInFlight = false;
-          updateAROverlay(e.data.wrist, e.data.indexTip);
-        }
-      };
+      handLandmarker = await tasksVision.HandLandmarker.createFromOptions(vision, {
+        baseOptions: {
+          modelAssetPath: "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task",
+          delegate: "GPU"
+        },
+        runningMode: "VIDEO",
+        numHands: 1
+      });
 
-      worker.postMessage({ type: 'INIT' });
+      loadingEl.style.display = "none";
     }
 
-    // Map Normalized Video Coordinates (0.0–1.0) to Screen Overlay Pixels
-    function updateAROverlay(wrist, indexTip) {
-      if (!wrist) {
+    // 4. Transform MediaPipe Coordinates to Fit Screen Dimensions
+    function updateAROverlay(results) {
+      if (!results.landmarks || results.landmarks.length === 0) {
         cube.visible = false;
         return;
       }
 
       cube.visible = true;
 
+      const wrist = results.landmarks[0][0];     // Wrist landmark
+      const indexTip = results.landmarks[0][8];  // Index finger tip
+
       const screenW = window.innerWidth;
       const screenH = window.innerHeight;
-      const videoW = video.videoWidth;
-      const videoH = video.videoHeight;
+      const videoW = video.videoWidth || 640;
+      const videoH = video.videoHeight || 480;
 
-      // Calculate object-fit: cover scaling offset ratios
+      // Compute Object-Fit Cover aspect scaling
       const screenAspect = screenW / screenH;
       const videoAspect = videoW / videoH;
 
@@ -229,50 +178,45 @@
         offsetX = (renderW - screenW) / 2;
       }
 
-      // Convert MediaPipe X (mirrored for front camera) & Y to Screen Pixels
+      // Map X (mirrored for front camera) & Y to pixel positions
       const pixelX = (1 - wrist.x) * renderW - offsetX;
       const pixelY = wrist.y * renderH - offsetY;
 
-      // Update 3D Cube Position
       cube.position.set(pixelX, pixelY, 0);
 
-      // Optional: Rotate cube using vector from wrist to index tip
+      // Rotate cube relative to wrist -> index finger vector
       if (indexTip) {
         const tipX = (1 - indexTip.x) * renderW - offsetX;
         const tipY = indexTip.y * renderH - offsetY;
         const angle = Math.atan2(tipY - pixelY, tipX - pixelX);
         cube.rotation.z = angle;
-        cube.rotation.x += 0.02; // Slow turn for 3D depth effect
+        cube.rotation.x += 0.03;
       }
     }
 
-    // Render loop with dynamic frame dispatching
+    // 5. Main Loop
     function animate() {
       requestAnimationFrame(animate);
 
-      // Pass frames to worker only when ready and idle (Backpressure prevention)
-      if (workerReady && !frameInFlight && video.readyState === 4) {
-        frameInFlight = true;
-        createImageBitmap(video).then((imageBitmap) => {
-          worker.postMessage({ type: 'PROCESS_FRAME', imageBitmap }, [imageBitmap]);
-        }).catch(() => {
-          frameInFlight = false;
-        });
+      if (handLandmarker && video.currentTime !== lastVideoTime && video.readyState >= 2) {
+        lastVideoTime = video.currentTime;
+        const results = handLandmarker.detectForVideo(video, performance.now());
+        updateAROverlay(results);
       }
 
       renderer.render(scene, camera);
     }
 
-    // Application Entry
+    // Application Entry Point
     async function start() {
       try {
         initThreeJS();
         await initCamera();
-        initWorker();
+        await initMediaPipe();
         animate();
       } catch (err) {
-        loadingEl.innerText = 'Error starting WebAR: ' + err.message;
-        console.error(err);
+        loadingEl.innerText = "Error: " + err.message;
+        console.error("Initialization Error:", err);
       }
     }
 
