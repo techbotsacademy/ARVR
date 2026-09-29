@@ -66,9 +66,9 @@
       cubeDistance: 2.0,
       cameraFOV: 50,
       colors: [0x00e5ff, 0x2979ff, 0xa855f7, 0xff3ea5, 0x22ff88],
-      // Mobile optimization
-      mobileVideoWidth: isMobile ? 640 : 1280,
-      mobileVideoHeight: isMobile ? 480 : 720,
+      // Mobile optimization - request higher resolution for better accuracy
+      mobileVideoWidth: isMobile ? 1280 : 1280,
+      mobileVideoHeight: isMobile ? 720 : 720,
       modelComplexity: isMobile ? 0 : 1, // 0 = lite (faster), 1 = full
     };
 
@@ -93,6 +93,7 @@
     }
 
     window.addEventListener('resize', onWindowResize);
+    window.addEventListener('orientationchange', onWindowResize);
 
     const cubeGroup = new THREE.Group();
     cubeGroup.position.z = -CONFIG.cubeDistance;
@@ -135,11 +136,42 @@
     }
 
     function toScreenCoords(landmark) {
-      const vw = videoEl.videoWidth || CONFIG.mobileVideoWidth;
-      const vh = videoEl.videoHeight || CONFIG.mobileVideoHeight;
-      const scale = Math.max(window.innerWidth / vw, window.innerHeight / vh);
-      const x = landmark.x * vw * scale - (vw * scale - window.innerWidth) / 2;
-      const y = landmark.y * vh * scale - (vh * scale - window.innerHeight) / 2;
+      // Get actual video dimensions
+      const videoWidth = videoEl.videoWidth;
+      const videoHeight = videoEl.videoHeight;
+      
+      if (!videoWidth || !videoHeight) {
+        return { x: window.innerWidth / 2, y: window.innerHeight / 2 };
+      }
+
+      // Get screen dimensions
+      const screenWidth = window.innerWidth;
+      const screenHeight = window.innerHeight;
+
+      // Calculate how the video is positioned with object-fit: cover
+      const videoAspect = videoWidth / videoHeight;
+      const screenAspect = screenWidth / screenHeight;
+
+      let displayWidth, displayHeight, offsetX, offsetY;
+
+      if (videoAspect > screenAspect) {
+        // Video is wider - height matches screen, width is cropped
+        displayHeight = screenHeight;
+        displayWidth = screenHeight * videoAspect;
+        offsetX = (screenWidth - displayWidth) / 2;
+        offsetY = 0;
+      } else {
+        // Video is taller - width matches screen, height is cropped
+        displayWidth = screenWidth;
+        displayHeight = screenWidth / videoAspect;
+        offsetX = 0;
+        offsetY = (screenHeight - displayHeight) / 2;
+      }
+
+      // Convert landmark coords (0-1) to screen coordinates
+      const x = offsetX + landmark.x * displayWidth;
+      const y = offsetY + landmark.y * displayHeight;
+
       return { x, y };
     }
 
