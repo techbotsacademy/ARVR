@@ -1,0 +1,1020 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>🥋 AR Karate Girl — Phone + Laptop</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #05050a;
+      font-family: "Segoe UI", Arial, sans-serif;
+    }
+
+    #camera-feed {
+      position: fixed;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      z-index: 1;
+      background: #000;
+      transform: scaleX(1);
+    }
+
+    #three-canvas {
+      position: fixed;
+      inset: 0;
+      width: 100%;
+      height: 100%;
+      z-index: 2;
+      pointer-events: none;
+    }
+
+    #start-screen {
+      position: fixed;
+      inset: 0;
+      z-index: 20;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      padding: 24px;
+      color: #fff;
+      background: radial-gradient(circle at 50% 35%, #2b1a3d 0%, #090713 70%);
+      transition: opacity .5s ease;
+    }
+
+    #start-screen.hidden {
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    #start-screen h1 {
+      margin: 0 0 10px;
+      font-size: clamp(2rem, 7vw, 3.3rem);
+      background: linear-gradient(90deg, #ffe08a, #ff8fbd, #9be8ff);
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
+    }
+
+    #start-screen p {
+      max-width: 650px;
+      margin: 0 0 26px;
+      color: #ddd3ec;
+      line-height: 1.55;
+      font-size: clamp(.95rem, 2.4vw, 1.1rem);
+    }
+
+    #start-btn {
+      border: 0;
+      border-radius: 999px;
+      padding: 15px 34px;
+      font-size: 1rem;
+      font-weight: 700;
+      cursor: pointer;
+      color: #1b1230;
+      background: linear-gradient(135deg, #ffe2a8, #ff9ecf 55%, #9be8ff);
+      box-shadow: 0 8px 35px rgba(255, 158, 207, .35);
+    }
+
+    #status-label,
+    #punch-counter,
+    #fall-timer,
+    #camera-badge {
+      position: fixed;
+      z-index: 6;
+      color: #fff;
+      background: rgba(20, 10, 35, .58);
+      border: 1px solid rgba(255,255,255,.12);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      border-radius: 999px;
+      pointer-events: none;
+      white-space: nowrap;
+    }
+
+    #status-label {
+      left: 50%;
+      bottom: 22px;
+      transform: translateX(-50%);
+      padding: 9px 17px;
+      font-size: .92rem;
+    }
+
+    #punch-counter {
+      left: 50%;
+      top: 16px;
+      transform: translateX(-50%);
+      padding: 8px 15px;
+      display: none;
+    }
+
+    #fall-timer {
+      left: 50%;
+      top: 59px;
+      transform: translateX(-50%);
+      padding: 7px 14px;
+      background: rgba(110, 20, 40, .68);
+      display: none;
+    }
+
+    #camera-badge {
+      left: 14px;
+      top: 14px;
+      padding: 7px 12px;
+      font-size: .78rem;
+      display: none;
+    }
+
+    #error-message {
+      position: fixed;
+      left: 50%;
+      top: 16px;
+      transform: translateX(-50%);
+      z-index: 30;
+      display: none;
+      max-width: 90%;
+      padding: 11px 16px;
+      border-radius: 10px;
+      background: rgba(130, 20, 25, .92);
+      color: #fff;
+      text-align: center;
+      font-size: .9rem;
+    }
+
+    #flash {
+      position: fixed;
+      inset: 0;
+      z-index: 5;
+      pointer-events: none;
+      background: rgba(255,255,255,.20);
+      opacity: 0;
+    }
+
+    @media (max-width: 600px) {
+      #status-label { bottom: 15px; max-width: 92%; overflow: hidden; text-overflow: ellipsis; }
+      #punch-counter { top: 12px; }
+      #fall-timer { top: 52px; }
+    }
+  </style>
+</head>
+<body>
+  <video id="camera-feed" autoplay playsinline muted></video>
+  <canvas id="three-canvas"></canvas>
+
+  <div id="camera-badge">📷 Camera</div>
+  <div id="status-label">Press START</div>
+  <div id="punch-counter">🥋 Hits: 0 / 2</div>
+  <div id="fall-timer">😵 Down: 60s</div>
+  <div id="error-message"></div>
+  <div id="flash"></div>
+
+  <div id="start-screen">
+    <h1>🥋 AR KARATE GIRL</h1>
+    <p>
+      On phone, the app first tries the BACK camera. On laptop, it uses the webcam.
+      Show a table, a phone lying in the scene, or your hand. Punch the karate girl twice.
+    </p>
+    <button id="start-btn">START MAGIC</button>
+  </div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+
+  <script>
+    "use strict";
+
+    /* =========================================================
+       ELEMENTS
+       ========================================================= */
+    const startScreen = document.getElementById("start-screen");
+    const startBtn = document.getElementById("start-btn");
+    const videoEl = document.getElementById("camera-feed");
+    const canvas = document.getElementById("three-canvas");
+    const statusLabel = document.getElementById("status-label");
+    const punchCounter = document.getElementById("punch-counter");
+    const fallTimer = document.getElementById("fall-timer");
+    const errorBox = document.getElementById("error-message");
+    const cameraBadge = document.getElementById("camera-badge");
+    const flash = document.getElementById("flash");
+
+    /* =========================================================
+       CAMERA STATE
+       ========================================================= */
+    let mediaStream = null;
+    let isMirrored = false;
+    let cameraFacing = "unknown";
+    let cameraStarted = false;
+
+    /* =========================================================
+       THREE.JS STATE
+       ========================================================= */
+    let scene = null;
+    let arCamera = null;
+    let renderer = null;
+    let clock = null;
+    let character = null;
+    let visualGroup = null;
+    let karateModel = null;
+    let mixer = null;
+    let idleAction = null;
+
+    /* =========================================================
+       DETECTION STATE
+       ========================================================= */
+    let surfaceDetector = null;
+    let surfaceDetectionBusy = false;
+    let lastSurfaceDetection = 0;
+    const SURFACE_DETECTION_INTERVAL = 650;
+
+    let lastTable = null;
+    let lastPhone = null;
+    let lastHandPalm = null;
+    let placementSource = "none";
+
+    /* =========================================================
+       CHARACTER / PUNCH STATE
+       ========================================================= */
+    let characterState = "hidden"; // hidden, active, fallen
+    let hitCount = 0;
+    let fallStartedAt = 0;
+    const FALL_DURATION = 60000;
+
+    let handTracker = null;
+    let handBusy = false;
+    let lastHandFrame = 0;
+    const HAND_INTERVAL = 45;
+
+    let handLast = null;
+    let lastPunchTime = 0;
+    const PUNCH_COOLDOWN = 850;
+    const PUNCH_SPEED = 500;
+    const PUNCH_RADIUS = 170;
+
+    let characterScreen = {
+      x: window.innerWidth / 2,
+      y: window.innerHeight / 2
+    };
+
+    let audioContext = null;
+
+    /* =========================================================
+       START
+       ========================================================= */
+    startBtn.addEventListener("click", startApp);
+    window.addEventListener("resize", onResize);
+
+    async function startApp() {
+      startBtn.disabled = true;
+      statusLabel.textContent = "📷 Opening camera...";
+      hideError();
+
+      try {
+        await startCamera();
+        initThree();
+        initAudio();
+
+        statusLabel.textContent = "⏳ Loading table / phone detector...";
+        surfaceDetector = await cocoSsd.load();
+
+        statusLabel.textContent = "⏳ Loading hand detector...";
+        initHandTracking();
+
+        await loadKarateGirl();
+
+        cameraStarted = true;
+        startScreen.classList.add("hidden");
+        cameraBadge.style.display = "block";
+        cameraBadge.textContent = cameraFacing === "environment"
+          ? "📷 BACK CAMERA"
+          : "📷 WEBCAM / FRONT CAMERA";
+
+        statusLabel.textContent = "🔎 Looking for table, phone, or hand...";
+        requestAnimationFrame(animate);
+      } catch (err) {
+        console.error("Startup error:", err);
+        startBtn.disabled = false;
+        showError(getCameraFriendlyError(err));
+        statusLabel.textContent = "Camera setup failed";
+      }
+    }
+
+    async function startCamera() {
+      if (location.protocol === "file:") {
+        throw new Error("Open this through HTTPS / GitHub Pages or a local server. Do not open the HTML directly with file://");
+      }
+
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        throw new Error("This browser does not support camera access.");
+      }
+
+      // IMPORTANT:
+      // First try the rear camera. This is what makes the same GitHub URL
+      // useful for phone AR: table / phone / hand in front of the phone.
+      try {
+        mediaStream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: { exact: "environment" },
+            width: { ideal: 1280 },
+            height: { ideal: 720 }
+          },
+          audio: false
+        });
+        cameraFacing = "environment";
+        isMirrored = false;
+      } catch (rearError) {
+        // Laptop webcams usually do not have an "environment" camera.
+        // Fall back to the normal webcam/front camera.
+        mediaStream = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: "user",
+            width: { ideal: 1280 },
+            height: { ideal: 720 }
+          },
+          audio: false
+        });
+
+        cameraFacing = "user";
+        isMirrored = true;
+      }
+
+      videoEl.srcObject = mediaStream;
+      videoEl.style.transform = isMirrored ? "scaleX(-1)" : "scaleX(1)";
+
+      await new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error("Camera did not start in time.")), 10000);
+        videoEl.onloadedmetadata = () => {
+          clearTimeout(timeout);
+          videoEl.play().then(resolve).catch(reject);
+        };
+      });
+    }
+
+    function getCameraFriendlyError(err) {
+      if (!err) return "Camera could not be started.";
+      if (err.name === "NotAllowedError" || err.name === "PermissionDeniedError") {
+        return "Please allow camera permission and reload the page.";
+      }
+      if (err.name === "NotFoundError") {
+        return "No camera was found on this device.";
+      }
+      if (err.name === "NotReadableError") {
+        return "The camera is being used by another app. Close it and try again.";
+      }
+      return err.message || "Camera unavailable.";
+    }
+
+    /* =========================================================
+       UI HELPERS
+       ========================================================= */
+    function showError(message) {
+      errorBox.textContent = message;
+      errorBox.style.display = "block";
+    }
+
+    function hideError() {
+      errorBox.style.display = "none";
+    }
+
+    function setStatus(message) {
+      statusLabel.textContent = message;
+    }
+
+    function flashScreen() {
+      flash.animate(
+        [
+          { opacity: 0 },
+          { opacity: 1 },
+          { opacity: 0 }
+        ],
+        { duration: 220, easing: "ease-out" }
+      );
+    }
+
+    /* =========================================================
+       THREE.JS
+       ========================================================= */
+    function initThree() {
+      scene = new THREE.Scene();
+
+      arCamera = new THREE.PerspectiveCamera(
+        55,
+        window.innerWidth / window.innerHeight,
+        0.1,
+        100
+      );
+      arCamera.position.set(0, 0, 0);
+
+      renderer = new THREE.WebGLRenderer({
+        canvas,
+        alpha: true,
+        antialias: true,
+        powerPreference: "high-performance"
+      });
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+      renderer.setClearColor(0x000000, 0);
+
+      scene.add(new THREE.AmbientLight(0xffffff, 1.35));
+
+      const key = new THREE.DirectionalLight(0xffffff, 1.5);
+      key.position.set(2, 4, 4);
+      scene.add(key);
+
+      const fill = new THREE.PointLight(0x9bdcff, 0.75, 15);
+      fill.position.set(-3, 1, 4);
+      scene.add(fill);
+
+      character = new THREE.Group();
+      character.visible = false;
+      scene.add(character);
+
+      visualGroup = new THREE.Group();
+      character.add(visualGroup);
+
+      clock = new THREE.Clock();
+    }
+
+    async function loadKarateGirl() {
+      return new Promise((resolve, reject) => {
+        const loader = new THREE.GLTFLoader();
+
+        loader.load(
+          "models/girl.glb",
+          gltf => {
+            karateModel = gltf.scene;
+            karateModel.traverse(obj => {
+              if (obj.isMesh) {
+                obj.castShadow = true;
+                obj.receiveShadow = true;
+              }
+            });
+
+            visualGroup.add(karateModel);
+
+            // Try to choose a useful animation. If the GLB has only one,
+            // that one is used. If it has no animation, the model still shows.
+            if (gltf.animations && gltf.animations.length) {
+              mixer = new THREE.AnimationMixer(karateModel);
+
+              const preferred = gltf.animations.find(a =>
+                /idle|stand|karate|martial|fight|dance|walk|action/i.test(a.name)
+              ) || gltf.animations[0];
+
+              idleAction = mixer.clipAction(preferred);
+              idleAction.reset().play();
+            }
+
+            // Normalize model size without changing the GLB file.
+            const box = new THREE.Box3().setFromObject(karateModel);
+            const size = new THREE.Vector3();
+            const center = new THREE.Vector3();
+            box.getSize(size);
+            box.getCenter(center);
+
+            if (size.y > 0) {
+              const targetHeight = 1.75;
+              const scale = targetHeight / size.y;
+              karateModel.scale.setScalar(scale);
+
+              // Put the model feet approximately at the visualGroup origin.
+              karateModel.position.y -= center.y * scale;
+            }
+
+            resolve();
+          },
+          undefined,
+          reject
+        );
+      });
+    }
+
+    /* =========================================================
+       COCO-SSD SURFACE DETECTION
+       ========================================================= */
+    async function detectSurfaces(now) {
+      if (!surfaceDetector || !cameraStarted) return;
+      if (surfaceDetectionBusy) return;
+      if (now - lastSurfaceDetection < SURFACE_DETECTION_INTERVAL) return;
+      if (videoEl.readyState < 2 || videoEl.videoWidth < 10) return;
+
+      surfaceDetectionBusy = true;
+      lastSurfaceDetection = now;
+
+      try {
+        const predictions = await surfaceDetector.detect(videoEl);
+
+        const tables = predictions
+          .filter(p => p.class === "dining table" && p.score >= 0.18)
+          .sort((a, b) => b.score - a.score);
+
+        const phones = predictions
+          .filter(p => p.class === "cell phone" && p.score >= 0.18)
+          .sort((a, b) => b.score - a.score);
+
+        lastTable = null;
+        lastPhone = null;
+
+        if (tables.length) {
+          const p = tables[0];
+          const [x, y, w, h] = p.bbox;
+          if (w >= 40 && h >= 18) {
+            lastTable = { x, y, w, h, score: p.score, time: now };
+          }
+        }
+
+        if (phones.length) {
+          const p = phones[0];
+          const [x, y, w, h] = p.bbox;
+          if (w >= 12 && h >= 10) {
+            lastPhone = { x, y, w, h, score: p.score, time: now };
+          }
+        }
+      } catch (err) {
+        console.warn("Surface detection error:", err);
+      } finally {
+        surfaceDetectionBusy = false;
+      }
+    }
+
+    /* =========================================================
+       MEDIAPIPE HANDS
+       ========================================================= */
+    function initHandTracking() {
+      handTracker = new Hands({
+        locateFile: file =>
+          `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`
+      });
+
+      handTracker.setOptions({
+        maxNumHands: 2,
+        modelComplexity: 1,
+        minDetectionConfidence: 0.55,
+        minTrackingConfidence: 0.55
+      });
+
+      handTracker.onResults(onHandResults);
+    }
+
+    async function processHandFrame(now) {
+      if (!handTracker || handBusy) return;
+      if (now - lastHandFrame < HAND_INTERVAL) return;
+      if (videoEl.readyState < 2) return;
+
+      handBusy = true;
+      lastHandFrame = now;
+
+      try {
+        await handTracker.send({ image: videoEl });
+      } catch (err) {
+        console.warn("Hand tracking error:", err);
+      } finally {
+        handBusy = false;
+      }
+    }
+
+    function onHandResults(results) {
+      const hands = results.multiHandLandmarks || [];
+
+      if (!hands.length) {
+        lastHandPalm = null;
+        handLast = null;
+        return;
+      }
+
+      // Use the first detected hand for palm fallback and punch detection.
+      const lm = hands[0];
+      const palm = getPalmCenter(lm);
+
+      // MediaPipe x=0 is the left edge of the original image.
+      // For mirrored webcam, convert x. For rear camera, keep x normal.
+      const normalizedX = isMirrored ? (1 - palm.x) : palm.x;
+
+      lastHandPalm = {
+        x: normalizedX * window.innerWidth,
+        y: palm.y * window.innerHeight,
+        time: performance.now()
+      };
+
+      const now = performance.now();
+      let speed = 0;
+
+      if (handLast) {
+        const dt = Math.max((now - handLast.time) / 1000, 0.016);
+        speed = Math.hypot(
+          lastHandPalm.x - handLast.x,
+          lastHandPalm.y - handLast.y
+        ) / dt;
+      }
+
+      handLast = {
+        x: lastHandPalm.x,
+        y: lastHandPalm.y,
+        time: now
+      };
+
+      if (characterState !== "active") return;
+      if (!character.visible) return;
+
+      const fist = isFist(lm);
+      const dx = lastHandPalm.x - characterScreen.x;
+      const dy = lastHandPalm.y - characterScreen.y;
+      const distance = Math.hypot(dx, dy);
+
+      if (
+        fist &&
+        speed >= PUNCH_SPEED &&
+        distance <= PUNCH_RADIUS &&
+        now - lastPunchTime > PUNCH_COOLDOWN
+      ) {
+        lastPunchTime = now;
+        registerPunch();
+      }
+    }
+
+    function getPalmCenter(lm) {
+      // Wrist + MCP points gives a more stable palm center than a single landmark.
+      const ids = [0, 5, 9, 17];
+      let x = 0;
+      let y = 0;
+      for (const id of ids) {
+        x += lm[id].x;
+        y += lm[id].y;
+      }
+      return { x: x / ids.length, y: y / ids.length };
+    }
+
+    function isFist(landmarks) {
+      const wrist = landmarks[0];
+      const fingers = [
+        [8, 6],
+        [12, 10],
+        [16, 14],
+        [20, 18]
+      ];
+
+      let folded = 0;
+
+      for (const [tipId, pipId] of fingers) {
+        const tip = landmarks[tipId];
+        const pip = landmarks[pipId];
+
+        const tipDistance = Math.hypot(
+          tip.x - wrist.x,
+          tip.y - wrist.y
+        );
+        const pipDistance = Math.hypot(
+          pip.x - wrist.x,
+          pip.y - wrist.y
+        );
+
+        if (tipDistance < pipDistance * 1.08) folded++;
+      }
+
+      return folded >= 3;
+    }
+
+    /* =========================================================
+       PLACEMENT
+       ========================================================= */
+    function choosePlacementSource() {
+      // Table gets first priority, then phone, then hand fallback.
+      if (lastTable) return "table";
+      if (lastPhone) return "phone";
+      if (lastHandPalm) return "hand";
+      return "none";
+    }
+
+    function updateCharacterPlacement(delta) {
+      if (!character) return;
+
+      // Once she has fallen, do not reposition her using the camera.
+      if (characterState === "fallen") return;
+
+      placementSource = choosePlacementSource();
+
+      if (placementSource === "none") {
+        character.visible = false;
+        characterState = "hidden";
+        punchCounter.style.display = "none";
+        characterScreen.x = window.innerWidth / 2;
+        characterScreen.y = window.innerHeight / 2;
+        setStatus("🔎 Looking for table, phone, or hand...");
+        return;
+      }
+
+      character.visible = true;
+      characterState = "active";
+      punchCounter.style.display = "block";
+
+      let screenX = 0;
+      let screenY = 0;
+      let desiredScale = 0.34;
+
+      if (placementSource === "table") {
+        const s = lastTable;
+        const centerX = s.x + s.w / 2;
+
+        // Table top approximation: near the upper portion of the detected box.
+        const topY = s.y + s.h * 0.15;
+
+        screenX = cameraXToScreen(centerX);
+        screenY = cameraYToScreen(topY);
+
+        const widthRatio = s.w / Math.max(videoEl.videoWidth, 1);
+        desiredScale = THREE.MathUtils.clamp(
+          0.25 + widthRatio * 0.42,
+          0.25,
+          0.55
+        );
+
+        setStatus("🥋 Table found! Punch me twice!");
+      }
+
+      if (placementSource === "phone") {
+        const s = lastPhone;
+        const centerX = s.x + s.w / 2;
+        const topY = s.y + s.h * 0.05;
+
+        screenX = cameraXToScreen(centerX);
+        screenY = cameraYToScreen(topY);
+
+        const widthRatio = s.w / Math.max(videoEl.videoWidth, 1);
+        desiredScale = THREE.MathUtils.clamp(
+          0.22 + widthRatio * 0.55,
+          0.23,
+          0.46
+        );
+
+        setStatus("📱 Phone found! I'm standing on it!");
+      }
+
+      if (placementSource === "hand") {
+        screenX = lastHandPalm.x;
+        screenY = lastHandPalm.y;
+        desiredScale = 0.32;
+        setStatus("✋ Hand found! I'm on your palm!");
+      }
+
+      characterScreen.x = screenX;
+      characterScreen.y = screenY;
+
+      // Convert screen position to a stable 3D overlay position.
+      const distance = 3.25;
+      const fov = THREE.MathUtils.degToRad(arCamera.fov);
+      const halfHeight = distance * Math.tan(fov / 2);
+      const halfWidth = halfHeight * arCamera.aspect;
+
+      const ndcX = (screenX / window.innerWidth) * 2 - 1;
+      const ndcY = -((screenY / window.innerHeight) * 2 - 1);
+
+      const targetX = ndcX * halfWidth;
+      const targetY = ndcY * halfHeight - 0.10;
+
+      const follow = Math.min(delta * 11, 1);
+      character.position.x = THREE.MathUtils.lerp(character.position.x, targetX, follow);
+      character.position.y = THREE.MathUtils.lerp(character.position.y, targetY, follow);
+      character.position.z = -distance;
+
+      const scaleFollow = Math.min(delta * 8, 1);
+      const currentScale = character.scale.x || desiredScale;
+      const nextScale = THREE.MathUtils.lerp(currentScale, desiredScale, scaleFollow);
+      character.scale.setScalar(nextScale);
+    }
+
+    function cameraXToScreen(x) {
+      const width = Math.max(videoEl.videoWidth, 1);
+      const displayX = isMirrored ? (width - x) : x;
+      return (displayX / width) * window.innerWidth;
+    }
+
+    function cameraYToScreen(y) {
+      const height = Math.max(videoEl.videoHeight, 1);
+      return (y / height) * window.innerHeight;
+    }
+
+    /* =========================================================
+       PUNCH / FALL
+       ========================================================= */
+    function registerPunch() {
+      hitCount++;
+      punchCounter.textContent = `🥋 Hits: ${hitCount} / 2`;
+      flashScreen();
+      playTone(hitCount === 1 ? 330 : 180, .18);
+
+      if (hitCount === 1) {
+        say("Oh!");
+        reactToFirstPunch();
+        return;
+      }
+
+      if (hitCount >= 2) {
+        say("Oh no!");
+        fallDown();
+      }
+    }
+
+    function reactToFirstPunch() {
+      if (!character) return;
+
+      character.userData.reactionUntil = performance.now() + 650;
+      character.userData.reactionRotation = character.rotation.z;
+
+      // Small backward reaction.
+      character.position.x += isMirrored ? -0.10 : 0.10;
+    }
+
+    function fallDown() {
+      if (!character) return;
+
+      characterState = "fallen";
+      fallStartedAt = performance.now();
+      character.visible = true;
+      fallTimer.style.display = "block";
+      punchCounter.style.display = "block";
+      punchCounter.textContent = "🥋 Hits: 2 / 2";
+
+      if (idleAction) idleAction.stop();
+
+      // Fall sideways and stay there. No camera repositioning while fallen.
+      character.userData.fallStartRotation = character.rotation.z;
+      character.userData.fallTargetRotation = character.rotation.z - Math.PI / 2;
+      character.userData.fallStartY = character.position.y;
+      character.userData.fallTargetY = character.position.y - 0.18;
+      character.userData.fallStarted = performance.now();
+
+      setStatus("😵 Oh no! I'm down for 60 seconds...");
+    }
+
+    function updateFall(delta) {
+      if (characterState !== "fallen" || !character) return;
+
+      const now = performance.now();
+      const elapsed = now - fallStartedAt;
+      const fallProgress = Math.min(elapsed / 650, 1);
+
+      const eased = 1 - Math.pow(1 - fallProgress, 3);
+
+      character.rotation.z = THREE.MathUtils.lerp(
+        character.userData.fallStartRotation,
+        character.userData.fallTargetRotation,
+        eased
+      );
+
+      character.position.y = THREE.MathUtils.lerp(
+        character.userData.fallStartY,
+        character.userData.fallTargetY,
+        eased
+      );
+
+      const remaining = Math.max(0, Math.ceil((FALL_DURATION - elapsed) / 1000));
+      fallTimer.textContent = `😵 Down: ${remaining}s`;
+
+      if (elapsed >= FALL_DURATION) {
+        standUpAgain();
+      }
+    }
+
+    function standUpAgain() {
+      characterState = "active";
+      hitCount = 0;
+      punchCounter.textContent = "🥋 Hits: 0 / 2";
+      fallTimer.style.display = "none";
+
+      character.rotation.z = 0;
+      character.position.y += 0.18;
+
+      if (idleAction) {
+        idleAction.reset().play();
+      }
+
+      setStatus("🥋 I'm back! Punch me twice again!");
+    }
+
+    function updateCharacterAnimation(delta) {
+      if (mixer && characterState !== "fallen") {
+        mixer.update(delta);
+      }
+
+      if (!character) return;
+
+      const now = performance.now();
+      const reactionUntil = character.userData.reactionUntil || 0;
+
+      if (reactionUntil > now && characterState === "active") {
+        const remaining = (reactionUntil - now) / 650;
+        character.rotation.z = Math.sin((1 - remaining) * Math.PI * 3) * 0.14;
+      } else if (characterState === "active") {
+        character.rotation.z *= 0.92;
+      }
+    }
+
+    /* =========================================================
+       SPEECH / SOUND
+       ========================================================= */
+    function say(text) {
+      try {
+        if (!("speechSynthesis" in window)) return;
+        window.speechSynthesis.cancel();
+        const utterance = new SpeechSynthesisUtterance(text);
+        utterance.lang = "en-US";
+        utterance.rate = 1.05;
+        utterance.pitch = 1.15;
+        utterance.volume = 1;
+        window.speechSynthesis.speak(utterance);
+      } catch (err) {
+        console.warn("Speech error:", err);
+      }
+    }
+
+    function initAudio() {
+      try {
+        audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      } catch (err) {
+        audioContext = null;
+      }
+    }
+
+    function playTone(frequency, duration) {
+      if (!audioContext) return;
+
+      try {
+        if (audioContext.state === "suspended") audioContext.resume();
+
+        const osc = audioContext.createOscillator();
+        const gain = audioContext.createGain();
+
+        osc.type = "sine";
+        osc.frequency.value = frequency;
+        gain.gain.setValueAtTime(0.001, audioContext.currentTime);
+        gain.gain.exponentialRampToValueAtTime(.12, audioContext.currentTime + .015);
+        gain.gain.exponentialRampToValueAtTime(.001, audioContext.currentTime + duration);
+
+        osc.connect(gain);
+        gain.connect(audioContext.destination);
+        osc.start();
+        osc.stop(audioContext.currentTime + duration + .03);
+      } catch (err) {
+        console.warn("Audio error:", err);
+      }
+    }
+
+    /* =========================================================
+       RESIZE
+       ========================================================= */
+    function onResize() {
+      if (!arCamera || !renderer) return;
+
+      arCamera.aspect = window.innerWidth / window.innerHeight;
+      arCamera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+
+      if (placementSource === "hand" && lastHandPalm) {
+        characterScreen.x = lastHandPalm.x;
+        characterScreen.y = lastHandPalm.y;
+      }
+    }
+
+    /* =========================================================
+       MAIN LOOP
+       ========================================================= */
+    function animate() {
+      requestAnimationFrame(animate);
+
+      if (!cameraStarted || !scene || !renderer) return;
+
+      const delta = Math.min(clock.getDelta(), 0.1);
+      const now = performance.now();
+
+      detectSurfaces(now);
+      processHandFrame(now);
+      updateCharacterPlacement(delta);
+      updateCharacterAnimation(delta);
+      updateFall(delta);
+
+      renderer.render(scene, arCamera);
+    }
+
+    /* =========================================================
+       CLEANUP
+       ========================================================= */
+    window.addEventListener("pagehide", () => {
+      try {
+        if (mediaStream) {
+          mediaStream.getTracks().forEach(track => track.stop());
+        }
+      } catch (err) {}
+    });
+  </script>
+</body>
+</html>
